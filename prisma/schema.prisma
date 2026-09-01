@@ -1,0 +1,396 @@
+// ============================================================
+// Wassil — multi-tenant schema
+// Provider: "sqlite" for local dev (out of the box).
+// At deploy time the provider is flipped to "postgresql"
+// automatically by scripts/switch-db.js (see vercel.json build).
+// All tenant data is scoped by `businessId` → hard row isolation.
+// ============================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  binaryTargets   = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Core: Users & Business (tenants) ----------
+
+model User {
+  id                String       @id @default(cuid())
+  name              String
+  email             String       @unique
+  passwordHash      String
+  lang              String       @default("fr")
+  role              String       @default("user") // "super" | "user"
+  active            Boolean      @default(true)
+  image             String?
+  currentBusinessId String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  memberships       Membership[]
+  notifications     Notification[]
+  activities        ActivityLog[]
+}
+
+model Business {
+  id         String       @id @default(cuid())
+  name       String
+  slug       String       @unique
+  industry   String?
+  country    String       @default("DZ")
+  lang       String       @default("fr")
+  status     String       @default("active") // active | suspended
+  planId     String?
+  plan       Plan?        @relation(fields: [planId], references: [id])
+  planStatus String       @default("active") // active | trial | overdue | cancelled
+  trialEndsAt DateTime?
+  limits     String? // JSON plan-limit overrides
+  settings   String? // JSON workspace preferences
+  logo       String?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  members    Membership[]
+  subscriptions Subscription[]
+  customers  Customer[]
+  conversations Conversation[]
+  messages   Message[]
+  automations Automation[]
+  runs       WorkflowRun[]
+  appointments Appointment[]
+  invoices   Invoice[]
+  integrations Integration[]
+  forms      WebForm[]
+  notifications Notification[]
+  jobs       Job[]
+  usage      UsageRecord[]
+  activities ActivityLog[]
+  apiKeys    ApiKey[]
+}
+
+model Membership {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       String   @default("MEMBER") // OWNER | ADMIN | MEMBER
+  createdAt  DateTime @default(now())
+
+  @@unique([businessId, userId])
+}
+
+// ---------- Billing / Plans ----------
+
+model Plan {
+  id        String   @id @default(cuid())
+  name      String
+  nameAr    String?
+  priceDzd  Float
+  priceUsd  Float    @default(0)
+  interval  String   @default("month") // month | year
+  limits    String // JSON: { customers, automations, messagesPerMonth, users, ai, integrations }
+  features  String // JSON array of feature strings (en)
+  active    Boolean  @default(true)
+  sort      Int      @default(0)
+  createdAt DateTime @default(now())
+  businesses Business[]
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  planId     String
+  plan       Plan     @relation(fields: [planId], references: [id])
+  status     String   @default("active") // active | past_due | cancelled
+  startedAt  DateTime @default(now())
+  renewsAt   DateTime?
+  cancelledAt DateTime?
+  createdAt  DateTime @default(now())
+}
+
+// ---------- CRM ----------
+
+model Customer {
+  id          String     @id @default(cuid())
+  businessId  String
+  business    Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name        String
+  phone       String?
+  email       String?
+  source      String     @default("manual") // whatsapp | facebook | instagram | telegram | form | manual ...
+  status      String     @default("new") // new | contacted | qualified | client | lost
+  tags        String? // JSON array of tag strings
+  notes       String?
+  customFields String? // JSON
+  lastContactAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  conversations Conversation[]
+  appointments Appointment[]
+  invoices    Invoice[]
+
+  @@index([businessId])
+}
+
+model Conversation {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  channel    String    @default("whatsapp") // whatsapp | facebook | instagram | telegram | form | manual | web
+  externalId String? // channel-side thread/contact id
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  title      String?
+  unreadCount Int      @default(0)
+  status     String    @default("open")
+  lastMessageAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  messages   Message[]
+
+  @@index([businessId, channel])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  businessId     String
+  business       Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  direction      String       @default("in") // in | out
+  sender         String? // label on outbound side
+  content        String
+  channel        String       @default("whatsapp")
+  externalId     String?
+  type           String       @default("text") // text | ai_suggestion | reminder | notification
+  status         String       @default("sent") // pending | sent | failed
+  metadata       String? // JSON
+  createdAt      DateTime     @default(now())
+
+  @@index([businessId, createdAt])
+}
+
+// ---------- Automations ----------
+
+model Automation {
+  id            String   @id @default(cuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  industry      String?
+  triggerType   String // MESSAGE_RECEIVED | FORM_SUBMITTED | APPOINTMENT_CREATED | APPOINTMENT_REMINDER | CUSTOMER_CREATED | SCHEDULE | WEBHOOK | MANUAL
+  triggerConfig String? // JSON
+  nodes         String // JSON array of action nodes
+  enabled       Boolean  @default(false)
+  runCount      Int      @default(0)
+  lastRunAt     DateTime?
+  aiGenerated   Boolean  @default(false)
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  runs          WorkflowRun[]
+
+  @@index([businessId, enabled])
+}
+
+model WorkflowRun {
+  id            String    @id @default(cuid())
+  automationId  String?
+  automation    Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
+  businessId    String
+  business      Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  trigger       String
+  triggerSnapshot String? // JSON context
+  status        String    @default("success") // success | error | partial
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+  steps         String? // JSON execution log
+  createdAt     DateTime  @default(now())
+
+  @@index([businessId, createdAt])
+}
+
+// ---------- Scheduling ----------
+
+model Job {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  type       String   // reminder | scheduled | message
+  runAt      DateTime
+  payload    String? // JSON
+  status     String   @default("pending") // pending | done | failed | skipped
+  error      String?
+  executedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([businessId, status, runAt])
+}
+
+// ---------- Appointments & Payments ----------
+
+model Appointment {
+  id           String   @id @default(cuid())
+  businessId   String
+  business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  clientName   String
+  phone        String?
+  service      String?
+  startsAt     DateTime
+  endsAt       DateTime?
+  status       String   @default("booked") // booked | confirmed | done | no_show | cancelled
+  reminderSent Boolean  @default(false)
+  notes        String?
+  source       String   @default("manual")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([businessId, startsAt])
+}
+
+model Invoice {
+  id           String   @id @default(cuid())
+  businessId   String
+  business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  number       String
+  clientName   String
+  phone        String?
+  amount       Float
+  currency     String   @default("DZD")
+  status       String   @default("pending") // pending | paid | overdue | cancelled
+  dueDate      DateTime?
+  paidAt       DateTime?
+  reminderCount Int     @default(0)
+  notes        String?
+  createdAt    DateTime @default(now())
+
+  @@index([businessId, status])
+}
+
+// ---------- Integrations & Forms ----------
+
+model Integration {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  type       String
+  name       String
+  status     String   @default("inactive") // active | inactive | error
+  enabled    Boolean  @default(false)
+  config     String? // JSON credentials/settings
+  lastTestedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([businessId, type])
+}
+
+model WebForm {
+  id          String   @id @default(cuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  slug        String
+  name        String
+  fields      String // JSON array {key,label,required,type,options}
+  submitCount Int      @default(0)
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@unique([businessId, slug])
+}
+
+// ---------- API Keys (workspace API access) ----------
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  keyHash    String
+  prefix     String
+  active     Boolean   @default(true)
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([businessId, name])
+}
+
+// ---------- Notifications & Activity ----------
+
+model Notification {
+  id         String   @id @default(cuid())
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       String   @default("info")
+  title      String
+  content    String?
+  link       String?
+  read       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([userId, read])
+}
+
+model ActivityLog {
+  id         String    @id @default(cuid())
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  kind       String
+  entityType String?
+  entityId   String?
+  summary    String
+  meta       String? // JSON
+  createdAt  DateTime  @default(now())
+
+  @@index([businessId, createdAt])
+}
+
+model UsageRecord {
+  id         String @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  period     String // YYYY-MM
+  metric     String // messages | customers | automations | ai_calls | runs
+  value      Int    @default(0)
+
+  @@unique([businessId, period, metric])
+}
+
+// ---------- Platform content & settings ----------
+
+model Template {
+  id            String   @id @default(cuid())
+  slug          String   @unique
+  name          String
+  description   String
+  industry      String
+  triggerType   String
+  triggerConfig String? // JSON
+  nodes         String   // JSON
+  icon          String   @default("sparkles")
+  featured      Boolean  @default(false)
+  sort          Int      @default(0)
+  createdAt     DateTime @default(now())
+  languages     String?  // JSON {en:{name,description},fr:{...},ar:{...}}
+}
+
+model SiteSetting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String // JSON
+  updatedAt DateTime @updatedAt
+}

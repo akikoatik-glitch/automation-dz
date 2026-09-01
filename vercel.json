@@ -1,0 +1,5 @@
+{
+  "framework": "nextjs",
+  "node": "24.x",
+  "buildCommand": "node scripts/switch-db.js postgres && prisma generate && next build"
+}

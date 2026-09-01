@@ -1,0 +1,17 @@
+name: wassil-cron
+
+on:
+  schedule:
+    # Every 5 minutes = 288 runs/day
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit the Wassil background-job endpoint
+        run: |
+          curl -fsS --max-time 60 \
+            -H "x-cron-key: ${{ secrets.CRON_KEY }}" \
+            "${{ vars.APP_URL || 'https://your-project.vercel.app' }}/api/jobs/cron"
